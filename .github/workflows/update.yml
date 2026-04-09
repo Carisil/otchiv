@@ -1,0 +1,45 @@
+name: Update Lotto Data
+
+on:
+  schedule:
+    # 토요일 23:00 KST = 14:00 UTC
+    - cron: '0 14 * * 6'
+    # 일요일 00:00 KST = 15:00 UTC (재시도)
+    - cron: '0 15 * * 6'
+    # 일요일 01:00 KST = 16:00 UTC (2차 재시도)
+    - cron: '0 16 * * 6'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install chromium --with-deps
+
+      - name: Run crawler
+        run: python crawl.py
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "data: $(date -u +%Y-%m-%d) 갱신"
+            git push
+          fi
