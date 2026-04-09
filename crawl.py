@@ -1,6 +1,6 @@
 """
-로또 6/45 당첨번호 크롤러 v2
-Playwright로 네트워크 요청을 가로채서 데이터를 수집한다.
+로또 6/45 당첨번호 크롤러 v3
+Playwright로 동행복권 결과 페이지를 열고, 내부 API 응답을 가로채서 데이터를 수집한다.
 """
 import json
 import os
@@ -34,130 +34,57 @@ def save_data(all_data):
             json.dump(all_data[-1], f, ensure_ascii=False, indent=2)
 
 
-def fetch_round_playwright(context, round_no):
-    """Playwright 페이지에서 특정 회차 데이터 가져오기"""
-    captured = {}
+def parse_api_item(item):
+    """새 내부 API 응답의 한 항목을 DrawResult 형식으로 변환"""
+    try:
+        round_no = item.get("ltEpsd")
+        if not round_no:
+            return None
+
+        numbers = []
+        for i in range(1, 7):
+            n = item.get(f"tm{i}WnNo")
+            if n is not None:
+                numbers.append(int(n))
+        if len(numbers) != 6:
+            return None
+
+        bonus = item.get("bnusNo") or item.get("bonusNo") or item.get("tm7WnNo") or 0
+
+        date_str = item.get("drwNoDate") or item.get("drawDate") or item.get("crDt") or ""
+        if date_str and "T" in date_str:
+            date_str = date_str.split("T")[0]
+
+        return {
+            "round": int(round_no),
+            "date": date_str,
+            "numbers": sorted(numbers),
+            "bonus": int(bonus),
+        }
+    except Exception as e:
+        print(f"    파싱 오류: {e}")
+        return None
+
+
+def crawl_with_playwright(existing_rounds):
+    """Playwright로 결과 페이지를 열고 내부 API 응답을 수집"""
+    captured_items = []
 
     def handle_response(response):
-        """네트워크 응답 가로채기"""
         url = response.url
-        if "getLottoNumber" in url or "selectPstLt645" in url or "lotto" in url.lower():
+        if "selectPstLt645" in url:
             try:
                 body = response.text()
                 if body.strip().startswith("{"):
                     data = json.loads(body)
-                    captured["api"] = data
-                    print(f"    API 응답 캡처: {url[:80]}")
-            except Exception:
-                pass
-
-    page = context.new_page()
-    page.on("response", handle_response)
-
-    try:
-        # 메인 페이지 방문 (JS 챌린지 통과)
-        page.goto("https://www.dhlottery.co.kr/", wait_until="networkidle", timeout=30000)
-        time.sleep(2)
-
-        # 방법 1: 기존 API를 JS에서 직접 호출
-        result = page.evaluate(f"""
-            async () => {{
-                try {{
-                    const resp = await fetch(
-                        'https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo={round_no}',
-                        {{
-                            headers: {{
-                                'X-Requested-With': 'XMLHttpRequest',
-                                'Accept': 'application/json'
-                            }}
-                        }}
-                    );
-                    const text = await resp.text();
-                    if (text.trim().startsWith('{{')) return JSON.parse(text);
-                    return {{'error': 'not json', 'status': resp.status, 'preview': text.substring(0, 200)}};
-                }} catch(e) {{
-                    return {{'error': e.message}};
-                }}
-            }}
-        """)
-
-        if result and result.get("returnValue") == "success":
-            data = result
-            page.close()
-            return {
-                "round": data["drwNo"],
-                "date": data["drwNoDate"],
-                "numbers": sorted([data[f"drwtNo{i}"] for i in range(1, 7)]),
-                "bonus": data["bnusNo"],
-            }
-
-        print(f"    방법1(fetch API) 결과: {json.dumps(result, ensure_ascii=False)[:150]}")
-
-        # 방법 2: 결과 페이지로 이동해서 DOM에서 추출
-        page.goto("https://www.dhlottery.co.kr/lt645/result", wait_until="networkidle", timeout=30000)
-        time.sleep(3)
-
-        # 페이지 내 번호 추출 시도 (여러 셀렉터)
-        for selector_set in [
-            {"balls": ".ball_645", "bonus": ".bonus"},
-            {"balls": "[class*='ball']", "bonus": "[class*='bonus']"},
-            {"balls": ".num", "bonus": ".bonus_num"},
-            {"balls": "span.ball", "bonus": "span.bonus"},
-        ]:
-            balls = page.query_selector_all(selector_set["balls"])
-            if len(balls) >= 6:
-                nums = []
-                for b in balls[:6]:
-                    text = b.text_content().strip()
-                    if text.isdigit():
-                        nums.append(int(text))
-                if len(nums) == 6:
-                    bonus_el = page.query_selector(selector_set["bonus"])
-                    bonus = int(bonus_el.text_content().strip()) if bonus_el else 0
-                    page.close()
-                    return {
-                        "round": round_no,
-                        "date": "",
-                        "numbers": sorted(nums),
-                        "bonus": bonus,
-                    }
-
-        # 방법 3: 전체 HTML에서 regex로 번호 패턴 추출
-        html = page.content()
-        import re
-        # "당첨번호" 근처의 숫자들
-        num_blocks = re.findall(r'>(\d{1,2})<', html)
-        valid_nums = [int(n) for n in num_blocks if 1 <= int(n) <= 45]
-
-        # 디버깅: 페이지 제목과 URL 출력
-        print(f"    페이지 제목: {page.title()}")
-        print(f"    페이지 URL: {page.url}")
-        print(f"    DOM에서 찾은 1~45 숫자 개수: {len(valid_nums)}")
-        if valid_nums:
-            print(f"    처음 20개: {valid_nums[:20]}")
-
-        # 디버깅: 캡처된 API 응답 출력
-        if captured:
-            print(f"    캡처된 API: {json.dumps(captured, ensure_ascii=False)[:200]}")
-
-        page.close()
-        return None
-
-    except Exception as e:
-        print(f"    Playwright 오류: {e}")
-        try:
-            page.close()
-        except Exception:
-            pass
-        return None
-
-
-def main():
-    existing = load_existing()
-    last_round = max((r["round"] for r in existing), default=0)
-    print(f"기존 데이터: {len(existing)}회차 (최신: {last_round}회차)")
-
-    new_rounds = []
+                    items = data.get("data", {}).get("list", [])
+                    for item in items:
+                        parsed = parse_api_item(item)
+                        if parsed and parsed["round"] not in existing_rounds:
+                            captured_items.append(parsed)
+                            print(f"    캡처: {parsed['round']}회차 {parsed['numbers']} +{parsed['bonus']}")
+            except Exception as e:
+                print(f"    응답 파싱 실패: {e}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -165,34 +92,61 @@ def main():
             user_agent=UA,
             viewport={"width": 1280, "height": 720},
         )
+        page = context.new_page()
+        page.on("response", handle_response)
 
-        round_no = last_round + 1
-        failures = 0
+        # 메인 페이지 → JS 챌린지 통과
+        print("메인 페이지 접속 중...")
+        page.goto("https://www.dhlottery.co.kr/", wait_until="networkidle", timeout=30000)
+        time.sleep(2)
 
-        print(f"\n{round_no}회차부터 수집 시작...")
-        while failures < 3:
-            print(f"\n  [{round_no}회차]")
-            data = fetch_round_playwright(context, round_no)
-            if data:
-                new_rounds.append(data)
-                print(f"  -> 성공!")
-                failures = 0
-                round_no += 1
-                time.sleep(1)
-            else:
-                print(f"  -> 실패")
-                failures += 1
-                round_no += 1
+        # 결과 페이지 → 내부 API 자동 호출됨
+        print("결과 페이지 접속 중...")
+        page.goto("https://www.dhlottery.co.kr/lt645/result", wait_until="networkidle", timeout=30000)
+        time.sleep(3)
+
+        # 이전/다음 페이지 네비게이션으로 더 많은 회차 수집 시도
+        for direction in ["prev", "prev", "prev", "prev", "prev"]:
+            try:
+                btn = page.query_selector(f'a:has-text("이전"), button:has-text("이전"), [class*="{direction}"]')
+                if btn:
+                    btn.click()
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                    time.sleep(2)
+            except Exception:
+                break
 
         browser.close()
 
-    if not new_rounds:
+    return captured_items
+
+
+def main():
+    existing = load_existing()
+    existing_rounds = {r["round"] for r in existing}
+    last_round = max(existing_rounds, default=0)
+    print(f"기존 데이터: {len(existing)}회차 (최신: {last_round}회차)")
+
+    print("\nPlaywright 크롤링 시작...")
+    new_rounds = crawl_with_playwright(existing_rounds)
+
+    # 중복 제거
+    seen = set()
+    unique_new = []
+    for r in new_rounds:
+        if r["round"] not in seen and r["round"] not in existing_rounds:
+            seen.add(r["round"])
+            unique_new.append(r)
+
+    if not unique_new:
         print("\n신규 데이터 없음")
         return False
 
-    all_data = existing + new_rounds
+    all_data = existing + unique_new
     save_data(all_data)
-    print(f"\n완료: +{len(new_rounds)}회차, 총 {len(all_data)}회차")
+    print(f"\n완료: +{len(unique_new)}회차, 총 {len(all_data)}회차")
+    for r in sorted(unique_new, key=lambda x: x["round"]):
+        print(f"  {r['round']}회차: {r['numbers']} +{r['bonus']} ({r['date']})")
     return True
 
 
