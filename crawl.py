@@ -1,5 +1,5 @@
 """
-로또 6/45 당첨번호 크롤러 v4
+로또 6/45 당첨번호 크롤러 v5
 동행복권 내부 API(selectPstLt645InfoNew) 응답을 Playwright로 가로채서 수집.
 """
 import json
@@ -49,21 +49,15 @@ def parse_api_item(item):
         if len(numbers) != 6:
             return None
 
-        # 보너스 번호: 여러 가능한 키 시도
-        bonus = 0
-        for key in ["bnusNo", "bonusNo", "tm7WnNo", "bnusWnNo", "tmBnusNo"]:
-            if item.get(key):
-                bonus = int(item[key])
-                break
+        # 보너스 번호: bnsWnNo
+        bonus = int(item.get("bnsWnNo", 0))
 
-        # 날짜: 여러 가능한 키 시도
-        date_str = ""
-        for key in ["drwNoDate", "drawDate", "drwDt", "crDt", "ltDrwDt"]:
-            if item.get(key):
-                date_str = str(item[key])
-                if "T" in date_str:
-                    date_str = date_str.split("T")[0]
-                break
+        # 날짜: ltRflYmd (yyyyMMdd → yyyy-MM-dd)
+        raw_date = str(item.get("ltRflYmd", ""))
+        if len(raw_date) == 8:
+            date_str = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+        else:
+            date_str = raw_date
 
         return {
             "round": int(round_no),
@@ -79,7 +73,6 @@ def parse_api_item(item):
 def crawl_with_playwright(existing_rounds):
     """Playwright로 동행복권 결과 페이지를 탐색하며 데이터 수집"""
     captured_items = []
-    raw_items = []  # 디버깅용
 
     def handle_response(response):
         url = response.url
@@ -90,7 +83,6 @@ def crawl_with_playwright(existing_rounds):
                     data = json.loads(body)
                     items = data.get("data", {}).get("list", [])
                     for item in items:
-                        raw_items.append(item)
                         parsed = parse_api_item(item)
                         if parsed and parsed["round"] not in existing_rounds:
                             captured_items.append(parsed)
@@ -104,23 +96,25 @@ def crawl_with_playwright(existing_rounds):
         page = context.new_page()
         page.on("response", handle_response)
 
-        # 1. 메인 페이지 (JS 챌린지)
+        # 메인 페이지 (JS 챌린지)
         print("메인 페이지 접속...")
         page.goto("https://www.dhlottery.co.kr/", wait_until="networkidle", timeout=30000)
         time.sleep(2)
 
-        # 2. 결과 페이지 (최신 회차 로드됨)
+        # 결과 페이지 (최신 회차 자동 로드)
         print("결과 페이지 접속...")
         page.goto("https://www.dhlottery.co.kr/lt645/result", wait_until="networkidle", timeout=30000)
         time.sleep(3)
 
-        # 3. 이전 페이지 탐색 (더 많은 회차 수집)
+        # 이전 페이지 탐색 (최대 10회)
         for i in range(10):
+            if not [r for r in captured_items if r["round"] not in existing_rounds]:
+                # 새로운 데이터가 없으면 이전 탐색 중단
+                pass
             try:
-                prev_btn = page.query_selector('a[class*="prev"], button[class*="prev"], a:has-text("이전")')
+                prev_btn = page.query_selector('a[class*="prev"], button[class*="prev"]')
                 if not prev_btn:
-                    # aria-label이나 다른 속성으로 탐색
-                    prev_btn = page.query_selector('[aria-label*="이전"], [title*="이전"]')
+                    prev_btn = page.query_selector('[aria-label*="이전"], [title*="이전"], a:has-text("이전")')
                 if prev_btn:
                     prev_btn.click()
                     page.wait_for_load_state("networkidle", timeout=10000)
@@ -129,12 +123,6 @@ def crawl_with_playwright(existing_rounds):
                     break
             except Exception:
                 break
-
-        # 디버깅: 첫 번째 raw 응답의 전체 키 출력
-        if raw_items:
-            first = raw_items[0]
-            print(f"\n  [디버그] API 응답 키 목록: {list(first.keys())}")
-            print(f"  [디버그] 첫 항목 전체: {json.dumps(first, ensure_ascii=False)[:500]}")
 
         browser.close()
 
@@ -165,6 +153,8 @@ def main():
     all_data = existing + unique_new
     save_data(all_data)
     print(f"\n완료: +{len(unique_new)}회차, 총 {len(all_data)}회차")
+    for r in sorted(unique_new, key=lambda x: x["round"]):
+        print(f"  {r['round']}회차: {r['numbers']} +{r['bonus']} ({r['date']})")
     return True
 
 
