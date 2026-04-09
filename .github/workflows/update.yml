@@ -2,13 +2,13 @@ name: Update Lotto Data
 
 on:
   schedule:
-    # 토요일 23:00 KST = 14:00 UTC
     - cron: '0 14 * * 6'
-    # 일요일 00:00 KST = 15:00 UTC (재시도)
     - cron: '0 15 * * 6'
-    # 일요일 01:00 KST = 16:00 UTC (2차 재시도)
     - cron: '0 16 * * 6'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   update:
